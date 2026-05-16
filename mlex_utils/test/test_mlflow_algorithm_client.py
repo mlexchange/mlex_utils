@@ -101,6 +101,7 @@ class TestMlflowAlgorithmClient:
         # Setup mock version
         mock_version = MagicMock()
         mock_version.run_id = "run-123"
+        mock_version.version = "1"
         mock_mlflow_algorithm_client.get_latest_versions.return_value = [mock_version]
 
         # Setup mock run
@@ -109,10 +110,18 @@ class TestMlflowAlgorithmClient:
         mock_mlflow_algorithm_client.get_run.return_value = mock_run
 
         # Setup mock download and file reading
-        algorithm_config = {"model_name": "test_algorithm", "type": "classification"}
-        mock_mlflow_algorithm_client.download_artifacts.return_value = None
+        algorithm_config = {
+            "model_name": "test_algorithm",
+            "type": "classification",
+        }
 
-        with patch("builtins.open", mock_open(read_data=json.dumps(algorithm_config))):
+        with (
+            patch("mlflow.artifacts.download_artifacts"),
+            patch(
+                "builtins.open",
+                mock_open(read_data=json.dumps(algorithm_config)),
+            ),
+        ):
             result = client.load_from_mlflow()
 
         # Verify result
@@ -164,15 +173,14 @@ class TestMlflowAlgorithmClient:
             patch("mlflow.set_tag"),
             patch("mlflow.log_param"),
             patch("mlflow.log_artifact"),
+            patch("mlflow.log_dict"),
             patch("mlflow.register_model", return_value=mock_model_details),
-            patch("builtins.open", mock_open()),
-            patch("json.dump"),
         ):
             # Configure start_run context manager
             mock_run = MagicMock()
             mock_run.info.run_id = "run-456"
-            mock_start_run.__enter__.return_value = mock_run
-            mock_start_run.__exit__.return_value = None
+            mock_start_run.return_value.__enter__.return_value = mock_run
+            mock_start_run.return_value.__exit__.return_value = None
 
             result = client.register_algorithm(algorithm_config)
 

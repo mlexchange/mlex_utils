@@ -22,6 +22,7 @@ dependencies = []
 [project.optional-dependencies]
 all = [
     "prefect==3.4.2",
+    "fastapi<0.132",
     "dash>=2.9.3",
     "dash-bootstrap-components==1.6.0",
     "dash-mantine-components==0.12.1",

@@ -1,3 +1,5 @@
+import base64
+import glob
 import json
 import logging
 import os
@@ -60,6 +62,14 @@ class MlflowAlgorithmClient:
         # Create client
         self.client = MlflowClient()
 
+    def _get_cache_path(self, model_name, version):
+        """
+        Get the cache path for an algorithm, following the same convention as
+        MLflowModelClient: <cache_dir>/<model_name>_v<version>
+        """
+        safe_name = model_name.replace("/", "_")
+        return os.path.join(self.cache_dir, f"{safe_name}_v{version}")
+
     def load_from_mlflow(self, algorithm_type=None):
         """
         Load algorithm definitions from MLflow
@@ -96,18 +106,16 @@ class MlflowAlgorithmClient:
 
                 version = versions[0]
 
-                # Get run to access artifacts
                 try:
-                    run = self.client.get_run(version.run_id)
-
-                    # Download the config artifact
-                    download_path = os.path.join(self.cache_dir, model.name)
-                    os.makedirs(download_path, exist_ok=True)
-                    artifact_path = os.path.join(download_path, "algorithm_config.json")
-
-                    self.client.download_artifacts(
-                        run.info.run_id, "algorithm_config.json", download_path
+                    # Download all artifacts for this run directly into the versioned
+                    # cache path, same pattern as MLflowModelClient.load_model
+                    download_path = self._get_cache_path(model.name, version.version)
+                    mlflow.artifacts.download_artifacts(
+                        artifact_uri=f"runs:/{version.run_id}/",
+                        dst_path=download_path,
                     )
+
+                    artifact_path = os.path.join(download_path, "algorithm_config.json")
                     with open(artifact_path, "r") as f:
                         algorithm_config = json.load(f)
 
@@ -127,13 +135,41 @@ class MlflowAlgorithmClient:
             logger.warning(f"Failed to load algorithms from MLflow: {e}")
             return False
 
-    def register_algorithm(self, algorithm_config, overwrite=False):
+    def get_logo_data_uri(self, model_name: str) -> str | None:
+        """
+        Return the logo for a registered model as a base64 data URI, or None if unavailable.
+        Logo is read from the local cache populated during load_from_mlflow.
+        Cache path follows the same convention as MLflowModelClient: <name>_v<version>.
+
+        Args:
+            model_name: Name of the registered model
+
+        Returns:
+            str: Base64 encoded data URI of the logo, or None if unavailable
+        """
+        try:
+            versions = self.client.get_latest_versions(model_name)
+            if not versions:
+                return None
+            cache_path = self._get_cache_path(model_name, versions[0].version)
+            pngs = glob.glob(os.path.join(cache_path, "logo", "*.png"))
+            if not pngs:
+                return None
+            with open(pngs[0], "rb") as f:
+                data = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/png;base64,{data}"
+        except Exception as e:
+            logger.warning(f"Could not load logo for {model_name}: {e}")
+            return None
+
+    def register_algorithm(self, algorithm_config, overwrite=False, logo_path=None):
         """
         Register an algorithm definition in MLflow with minimal parameters
 
         Args:
             algorithm_config (dict): Algorithm configuration with GUI parameters
             overwrite (bool): Whether to overwrite if algorithm already exists
+            logo_path (str): Optional path to a logo PNG to log alongside the config
 
         Returns:
             dict: Registration result with model name and version
@@ -205,13 +241,14 @@ class MlflowAlgorithmClient:
             # Log description
             mlflow.log_param("description", algorithm_config.get("description", ""))
 
-            # Save complete algorithm config for reference
-            temp_dir = os.path.join(self.cache_dir, "artifacts")
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_file = os.path.join(temp_dir, "algorithm_config.json")
-            with open(temp_file, "w") as f:
-                json.dump(algorithm_config, f, indent=2)
-            mlflow.log_artifact(temp_file)
+            # Log algorithm_config.json using mlflow.log_dict so no local file needed
+            mlflow.log_dict(algorithm_config, "algorithm_config.json")
+
+            # Log logo if logo_path is provided — kept separate from algorithm_config
+            # so models.json is never mutated and logo_path never appears in the stored config
+            if logo_path and os.path.exists(logo_path):
+                mlflow.log_artifact(logo_path, artifact_path="logo")
+                logger.info(f"Logged logo for {model_name} from {logo_path}")
 
             # Register the algorithm in the model registry
             try:
@@ -234,9 +271,6 @@ class MlflowAlgorithmClient:
                     "entity_type",
                     "algorithm_definition",
                 )
-
-                # Reload algorithms to include the newly registered one
-                self.load_from_mlflow(algorithm_type)
 
                 return {
                     "status": "success",
